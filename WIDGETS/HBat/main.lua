@@ -1,5 +1,5 @@
 --[[
-  HBat 0.1.0 -- バッテリー残量(%)と消費容量(mAh)の表示ウィジェット
+  HBat 0.2.0 -- バッテリー残量(%)と消費容量(mAh)の表示ウィジェット
   (EdgeTX 2.11 以降のカラー液晶機。作者の環境は EdgeTX 2.12)
 
   Copyright (C) 2026 Masayuki
@@ -12,7 +12,9 @@
     開始オフセットmAh = (100 - 開始電圧から求めた%) * Capacity / 100
     消費mAh = Σ ( Curr[A] * CurrGain[%] / 100 * 経過時間[ms] / 3600 )
 
-  表示: 「残量%(消費mAh)」を1行で表示します。例: 75%(1250mAh)
+  表示: 1行目に「残量%(消費mAh)」。例: 75%(1250mAh)
+        2行目に「パック電圧V 電流A(Max 最大電流A)」。例: 22.98V 11.5A(Max 35.2A)
+        (2行目はゾーンの高さが55px以上のとき。最大電流は電源投入またはResetSwからの最大値)
     - 電源が接続されていない間、および開始電圧が確定するまでは 0%(0mAh)
     - 接続を外した(テレメトリーが切れた)あとは、最後の値を保持
     - 自動リセットはしません。パック交換時は送信機の電源を入れ直すか ResetSw を使います
@@ -186,6 +188,9 @@ local options = {
 -- 状態はファイル全体で共有(ウィジェットが作り直されても保持される)
 local state = {
   mah             = 0,      -- 積分した消費容量 mAh(補正倍率込み)
+  maxCur          = 0,      -- 最大電流 A(表示用、補正倍率なしのセンサー値)
+  lastVolt        = 0,      -- 表示用の最後のパック電圧 V
+  lastCur         = 0,      -- 表示用の最後の電流 A
   offset          = 0,      -- 開始電圧から求めた消費済み容量 mAh
   initDone        = false,  -- 開始電圧による初期化が済んだか
   lastTick        = nil,    -- 前回の getTime()
@@ -277,6 +282,7 @@ local function step(widget)
     local active = (sw == true) or (type(sw) == "number" and sw > 0)
     if active and not state.resetHigh then
       state.mah = 0
+      state.maxCur = 0
       state.offset = 0
       state.initDone = false
       state.samples = {}
@@ -293,6 +299,13 @@ local function step(widget)
       end
     end
     state.resetHigh = active
+  end
+
+  -- 2行目の表示用(電圧・電流・最大電流)。リンクが切れている間は最後の値を保持
+  if voltage and cur ~= nil and getRSSI() ~= 0 then
+    state.lastVolt = voltage
+    state.lastCur = cur
+    if cur > state.maxCur then state.maxCur = cur end
   end
 
   -- 経過時間(ms)。複数のウィジェットが呼んでも二重加算されないよう共有の時刻を使う
@@ -437,6 +450,14 @@ local function refresh(widget, event, touchState)
   local label = string.format("%d%%(%dmAh)", shownPct, shownMah)
   local font = fitFont(label, zone.w - 8, zone.h)
   lcd.drawText(zone.x + 4, zone.y + 2, label, bit32.bor(font, textColor))
+
+  -- 2行目: パック電圧 / 電流(最大電流)。ゾーンが低い場合は省略
+  if zone.h >= 55 then
+    local line2 = string.format("%.2fV %.1fA(Max %.1fA)", state.lastVolt, state.lastCur, state.maxCur)
+    local ok, _, h1 = pcall(lcd.sizeText, label, font)
+    if not ok or type(h1) ~= "number" then h1 = 24 end
+    lcd.drawText(zone.x + 4, zone.y + 2 + h1 - 3, line2, bit32.bor(SMLSIZE, textColor))
+  end
 
   -- 設定が足りない時・開始電圧を取得中のときだけ、右上に小さく状態を表示
   if pct == nil then
